@@ -107,16 +107,24 @@
      collection can be read and watched with the plain get/set the Google script offers */
   const manifests = {};   // collection path -> Set of ids (once read)
   const idxPath = col => col + '/__index';
-  async function manifest(col) {
-    if (!manifests[col]) { const j = await call('get', { path: idxPath(col) }); manifests[col] = new Set((j.exists && j.data && j.data.ids) || []); }
-    return manifests[col];
+  const loading = {}, chains = {};
+  function manifest(col) {
+    if (manifests[col]) return Promise.resolve(manifests[col]);
+    if (!loading[col]) loading[col] = call('get', { path: idxPath(col) }).then(j => (manifests[col] = new Set((j.exists && j.data && j.data.ids) || []))).finally(() => { delete loading[col]; });
+    return loading[col];
   }
-  async function addToManifest(col, id) { const m = await manifest(col); if (m.has(id)) return; m.add(id); await call('set', { path: idxPath(col), data: { ids: [...m] } }); }
-  async function dropFromManifest(col, id) { const m = await manifest(col); if (!m.delete(id)) return; await call('set', { path: idxPath(col), data: { ids: [...m] } }); }
+  /* one manifest change at a time per collection, so saves made at the same moment never drop an id */
+  function editManifest(col, fn) {
+    const run = async () => { const m = await manifest(col); if (fn(m)) await call('set', { path: idxPath(col), data: { ids: [...m] } }); };
+    chains[col] = (chains[col] || Promise.resolve()).then(run, run);
+    return chains[col];
+  }
+  const addToManifest = (col, id) => editManifest(col, m => (m.has(id) ? false : (m.add(id), true)));
+  const dropFromManifest = (col, id) => editManifest(col, m => m.delete(id));
   async function readCollection(col) {
     const j = await call('get', { path: idxPath(col) });
     const ids = (j.exists && j.data && j.data.ids) || [];
-    manifests[col] = new Set(ids);
+    if (!chains[col] || !manifests[col]) manifests[col] = new Set(ids); else ids.forEach(i => manifests[col].add(i));
     const docs = [];
     for (let i = 0; i < ids.length; i += 50) {
       const part = ids.slice(i, i + 50).map(id => col + '/' + id);
