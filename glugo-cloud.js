@@ -103,19 +103,52 @@
   setInterval(poll, 20000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
 
-  function docRef(path) {
+  /* collections: a small "__index" doc in each collection lists its doc ids, so a whole
+     collection can be read and watched with the plain get/set the Google script offers */
+  const manifests = {};   // collection path -> Set of ids (once read)
+  const idxPath = col => col + '/__index';
+  async function manifest(col) {
+    if (!manifests[col]) { const j = await call('get', { path: idxPath(col) }); manifests[col] = new Set((j.exists && j.data && j.data.ids) || []); }
+    return manifests[col];
+  }
+  async function addToManifest(col, id) { const m = await manifest(col); if (m.has(id)) return; m.add(id); await call('set', { path: idxPath(col), data: { ids: [...m] } }); }
+  async function dropFromManifest(col, id) { const m = await manifest(col); if (!m.delete(id)) return; await call('set', { path: idxPath(col), data: { ids: [...m] } }); }
+  async function readCollection(col) {
+    const j = await call('get', { path: idxPath(col) });
+    const ids = (j.exists && j.data && j.data.ids) || [];
+    manifests[col] = new Set(ids);
+    const docs = [];
+    for (let i = 0; i < ids.length; i += 50) {
+      const part = ids.slice(i, i + 50).map(id => col + '/' + id);
+      const r = await call('getMany', { paths: part });
+      part.forEach((p, k) => { const d = r.docs[p] || {}; if (d.exists) docs.push(snap(p, true, d.data)); });
+    }
+    return docs;
+  }
+  const colWatchers = new Map(); // col -> {cbs:Set, last}
+  async function pollCols() {
+    for (const [col, w] of colWatchers) {
+      try { const docs = await readCollection(col); const sig = JSON.stringify(docs.map(d => [d.id, d.data()])); if (sig !== w.last) { w.last = sig; const qs = qsnap(docs); w.cbs.forEach(cb => { try { cb(qs); } catch (e) {} }); } } catch (e) {}
+    }
+  }
+  const qsnap = docs => ({ docs, size: docs.length, empty: !docs.length, forEach: f => docs.forEach(f) });
+  setInterval(() => { if (CONN && !document.hidden && colWatchers.size) pollCols(); }, 20000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && colWatchers.size) pollCols(); });
+
+  function docRef(path, inCol) {
     path = String(path).replace(/^\/+|\/+$/g, '');
+    const col = path.slice(0, path.lastIndexOf('/')), id = path.split('/').pop();
     return {
-      id: path.split('/').pop(), path,
+      id, path,
       collection(name) { return colRef(path + '/' + name); },
       async get() { const j = await call('get', { path }); return snap(path, j.exists, j.data); },
       async set(data, opts) {
         let d = data;
         if (opts && opts.merge) { const cur = await call('get', { path }); d = Object.assign({}, cur.exists ? cur.data : {}, data); }
-        await call('set', { path, data: d }); notify(path, d, true);
+        await call('set', { path, data: d }); if (inCol) await addToManifest(col, id); notify(path, d, true);
       },
-      async update(patch) { const cur = await call('get', { path }); const d = Object.assign({}, cur.exists ? cur.data : {}, patch); await call('set', { path, data: d }); notify(path, d, true); },
-      async delete() { await call('del', { path }); notify(path, undefined, false); },
+      async update(patch) { const cur = await call('get', { path }); const d = Object.assign({}, cur.exists ? cur.data : {}, patch); await call('set', { path, data: d }); if (inCol) await addToManifest(col, id); notify(path, d, true); },
+      async delete() { await call('del', { path }); if (inCol) await dropFromManifest(col, id); notify(path, undefined, false); },
       onSnapshot(cb, err) {
         let w = watchers.get(path); if (!w) { w = { cbs: new Set(), last: null }; watchers.set(path, w); }
         w.cbs.add(cb);
@@ -124,7 +157,21 @@
       }
     };
   }
-  function colRef(path) { return { path, doc(id) { return docRef(path + '/' + (id || Date.now().toString(36) + Math.random().toString(36).slice(2, 8))); } }; }
+  function colRef(path) {
+    path = String(path).replace(/^\/+|\/+$/g, '');
+    return {
+      path,
+      doc(id) { return docRef(path + '/' + (id || Date.now().toString(36) + Math.random().toString(36).slice(2, 8)), true); },
+      async get() { return qsnap(await readCollection(path)); },
+      async add(data) { const r = this.doc(); await r.set(data); return r; },
+      onSnapshot(cb, err) {
+        let w = colWatchers.get(path); if (!w) { w = { cbs: new Set(), last: null }; colWatchers.set(path, w); }
+        w.cbs.add(cb);
+        readCollection(path).then(docs => { w.last = JSON.stringify(docs.map(d => [d.id, d.data()])); cb(qsnap(docs)); }).catch(e => { if (err) err(e); });
+        return () => { w.cbs.delete(cb); if (!w.cbs.size) colWatchers.delete(path); };
+      }
+    };
+  }
   const db = { doc: docRef, collection: colRef };
   const user = { async id() { return 'me'; } };
   const downloads = {
