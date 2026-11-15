@@ -14,6 +14,9 @@
 
   function parseConn(code, key) {
     code = String(code || '').trim(); key = String(key || '').trim();
+    try { code = decodeURIComponent(code); } catch (e) {}
+    const ci = code.indexOf('#connect='); if (ci >= 0) code = code.slice(ci + 9);
+    code = code.replace(/\s+/g, '');
     if (code.includes('|')) { const i = code.lastIndexOf('|'); key = code.slice(i + 1).trim(); code = code.slice(0, i).trim(); }
     if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(code) || !/\/exec$/.test(code) || !key) return null;
     return { url: code, key };
@@ -189,5 +192,6 @@
     if (!CONN) { showConnect(''); return; }
     if (h === 'backups') showBackups();
   }
+  window.addEventListener('hashchange', () => { if (location.hash.indexOf('#connect=') === 0) start(); });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
 })();
