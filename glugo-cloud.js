@@ -16,7 +16,10 @@
     code = String(code || '').trim(); key = String(key || '').trim();
     try { code = decodeURIComponent(code); } catch (e) {}
     const ci = code.indexOf('#connect='); if (ci >= 0) code = code.slice(ci + 9);
+    code = code.replace(/[\uFF5C\u2223\u00A6\u2502\u01C0\u05C0\u2016]/g, '|');
+    code = code.replace(/(\/exec)\s+(\S+)\s*$/, '$1|$2');
     code = code.replace(/\s+/g, '');
+    if (!code.includes('|')) { const m = code.match(/^(.*\/exec)([A-Za-z0-9_-]{8,})$/); if (m) code = m[1] + '|' + m[2]; }
     if (code.includes('|')) { const i = code.lastIndexOf('|'); key = code.slice(i + 1).trim(); code = code.slice(0, i).trim(); }
     if (!/^https:\/\/script\.google(usercontent)?\.com\//.test(code) || !/\/exec$/.test(code) || !key) return null;
     return { url: code, key };
@@ -213,10 +216,12 @@
     const ov = overlay(`<div class="gc-top"><span></span><b>Connect to Google Drive</b><span></span></div>
       <div class="gc-body"><p>Paste your GLugo Apps connection (the Web app URL, then <b>|</b>, then the key) — the same one for Plans, Panel Mapper and Home Planner. Once per device.</p>
       <input class="gc-in" id="gcCode" placeholder="https://script.google.com/macros/s/…/exec|key" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <div style="font-size:14px;color:#8b949e">Key (only if it isn't already at the end of the line above)</div>
+      <input class="gc-in" id="gcKey" placeholder="key from your email" autocapitalize="off" autocorrect="off" spellcheck="false">
       <button class="gc-btn" id="gcGo">Connect</button><div class="gc-st ${msg ? 'bad' : ''}" id="gcSt">${msg || ''}</div></div>`);
     ov.querySelector('#gcGo').onclick = async () => {
-      const c = parseConn(ov.querySelector('#gcCode').value), st = ov.querySelector('#gcSt');
-      if (!c) { st.className = 'gc-st bad'; st.textContent = 'Paste the whole line: the URL ending in /exec, then |, then the key.'; return; }
+      const c = parseConn(ov.querySelector('#gcCode').value, ov.querySelector('#gcKey').value), st = ov.querySelector('#gcSt');
+      if (!c) { st.className = 'gc-st bad'; st.textContent = 'Paste the Web app URL (ending in /exec) in the first box and the key in the second box.'; return; }
       st.className = 'gc-st'; st.textContent = 'Connecting…';
       try { await call('ping', {}, c); ls.set(CONN_KEY, c); st.textContent = 'Connected ✓'; setTimeout(() => location.reload(), 400); }
       catch (e) { st.className = 'gc-st bad'; st.textContent = e.code === 'permission-denied' ? 'The key was not accepted.' : 'Could not reach your Google script. Check the URL and that it is deployed for "Anyone".'; }
